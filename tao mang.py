@@ -1,9 +1,9 @@
 import cv2
 import os
-import numpy as np
-import re  # Thêm thư viện re để xử lý chuỗi
-import pandas as pd  # Thêm pandas để hiển thị mảng con dưới dạng bảng
-import matplotlib.pyplot as plt  # Thêm matplotlib để vẽ hình 3D
+import cupy as cp  # Sử dụng CuPy để chạy với GPU
+import re
+import matplotlib.pyplot as plt
+import pandas as pd
 
 # Đường dẫn đến thư mục chứa các ảnh
 folder_path = r'D:\tepAnh'
@@ -29,19 +29,17 @@ if first_image is None:
 image_height, image_width = first_image.shape
 print(f"Kích thước ảnh được xác định: {image_width} x {image_height} pixels")
 
-# Tạo mảng 2D để lưu số của ảnh có pixel sáng nhất tại mỗi vị trí
-best_image_numbers = np.empty((image_height, image_width), dtype=object)
+# Tạo mảng 2D với kiểu dữ liệu số nguyên để lưu chỉ số ảnh có pixel sáng nhất tại mỗi vị trí
+best_image_numbers = cp.full((image_height, image_width), -1, dtype=cp.int32)
 
-# Mảng lưu giá trị pixel sáng nhất tại mỗi vị trí
-max_pixel_values = np.full((image_height, image_width), -1)
+# Mảng lưu giá trị pixel sáng nhất tại mỗi vị trí (tạo mảng CuPy)
+max_pixel_values = cp.full((image_height, image_width), -1, dtype=cp.int32)
 
-
-# Hàm để lấy phần số từ tên file
+# Hàm để lấy phần số từ tên file và chuyển thành số nguyên
 def extract_number_from_filename(filename):
     # Sử dụng biểu thức chính quy để tìm số trong tên file
     match = re.search(r'\d+', filename)
-    return match.group() if match else None
-
+    return int(match.group()) if match else None  # Chuyển thành số nguyên
 
 # Duyệt qua từng ảnh trong thư mục
 for image_file in image_files:
@@ -56,24 +54,21 @@ for image_file in image_files:
         print(f"Kích thước ảnh {image_file} không phù hợp, bỏ qua...")
         continue
 
+    # Chuyển đổi ảnh sang CuPy array
+    image = cp.asarray(image)
+
     # Duyệt qua từng pixel của ảnh và cập nhật mảng giá trị pixel lớn nhất
     brighter_pixels = image > max_pixel_values
     max_pixel_values[brighter_pixels] = image[brighter_pixels]
 
     # Lấy số từ tên ảnh và lưu vào mảng `best_image_numbers`
     image_number = extract_number_from_filename(image_file)
-    best_image_numbers[brighter_pixels] = image_number
+    best_image_numbers[brighter_pixels] = image_number  # Gán giá trị số nguyên thay vì chuỗi
 
 print("Mảng 2D với số ảnh có pixel sáng nhất tại mỗi vị trí đã được tạo.")
 
-# Ví dụ in ra số của ảnh có pixel sáng nhất tại vị trí (100, 200)
-print(f"Số của ảnh có pixel sáng nhất tại vị trí (100, 200): {best_image_numbers[100, 200]}")
-
-# Lưu mảng kết quả thành file nếu cần thiết (ví dụ: lưu dưới dạng .npy)
-output_path = os.path.join(folder_path, 'best_image_numbers.npy')
-np.save(output_path, best_image_numbers)
-print(f"Mảng số của ảnh đã được lưu thành công vào: {output_path}")
-
+# Chuyển kết quả từ CuPy về NumPy để hiển thị
+best_image_numbers_numpy = cp.asnumpy(best_image_numbers)
 
 # Hàm lấy một mảng con tùy ý từ mảng `best_image_numbers`
 def get_subarray(best_image_numbers, start_x, start_y, size):
@@ -90,27 +85,21 @@ def get_subarray(best_image_numbers, start_x, start_y, size):
     subarray = best_image_numbers[start_y:start_y + size, start_x:start_x + size]
     return subarray
 
+# Ví dụ: Lấy mảng con kích thước 320x320 từ vị trí (4860, 3630)
+subarray = get_subarray(best_image_numbers_numpy, 4860, 3630, 200)
 
-# Ví dụ: Lấy mảng con kích thước 320x320 từ vị trí (4850, 3590)
-subarray = get_subarray(best_image_numbers, 4860, 3630, 200)
-
-# 1. Cấu hình NumPy để in ra toàn bộ mảng mà không bị rút gọn
+# Cấu hình NumPy để in ra toàn bộ mảng mà không bị rút gọn
+import numpy as np
 np.set_printoptions(threshold=np.inf, linewidth=np.inf)
-print("Mảng con 320x320 từ vị trí (4850, 3590):")
+print("Mảng con 320x320 từ vị trí (4860, 3630):")
 print(subarray)  # In ra toàn bộ mảng con mà không bị rút gọn
 
-# 2. Lưu mảng con vào file .txt để xem toàn bộ
-output_txt_path = r'D:\tepAnh\subarray_320x320.txt'
-np.savetxt(output_txt_path, subarray, fmt='%s', delimiter=",")
-print(f"Mảng con đã được lưu vào file: {output_txt_path}")
-
-# 3. Sử dụng pandas để hiển thị mảng con dưới dạng bảng
+# Sử dụng pandas để hiển thị mảng con dưới dạng bảng
 subarray_df = pd.DataFrame(subarray)
 print("Mảng con dưới dạng DataFrame:")
 print(subarray_df.to_string())  # Hiển thị toàn bộ DataFrame mà không rút gọn
 
-
-# Tạo hình ảnh 3D từ mảng số tên ảnh
+# Tạo hình ảnh 3D từ mảng số thứ tự ảnh
 def create_3d_coordinates(subarray, scale=0.5):
     """
     Chuyển đổi mảng subarray thành tọa độ 3D.
@@ -121,7 +110,7 @@ def create_3d_coordinates(subarray, scale=0.5):
 
     for y in range(height):
         for x in range(width):
-            if subarray[y, x] is not None:  # Kiểm tra nếu giá trị không phải None
+            if subarray[y, x] != -1:  # Kiểm tra nếu giá trị khác -1
                 x_coords.append(x)
                 y_coords.append(y)
                 # Giá trị z nhân với scale (0,5 µm)
@@ -130,22 +119,27 @@ def create_3d_coordinates(subarray, scale=0.5):
 
     return x_coords, y_coords, z_coords
 
-
 # Tạo tọa độ 3D từ mảng `subarray`
 x_coords, y_coords, z_coords = create_3d_coordinates(subarray, scale=0.5)
 
-# Vẽ hình ảnh 3D sử dụng matplotlib
-fig = plt.figure(figsize=(10, 8))
-ax = fig.add_subplot(111, projection='3d')
+# Tạo một cửa sổ và sử dụng subplot để hiển thị cả hai hình ảnh
+fig = plt.figure(figsize=(14, 6))
 
-# Vẽ các điểm 3D
-ax.scatter(x_coords, y_coords, z_coords, c=z_coords, cmap='viridis', marker='o')
+# Tạo vùng hiển thị 3D ở bên trái (subplot 1)
+ax1 = fig.add_subplot(121, projection='3d')
+ax1.scatter(x_coords, y_coords, z_coords, c=z_coords, cmap='viridis', marker='o')
+ax1.set_xlabel('X (pixels)')
+ax1.set_ylabel('Y (pixels)')
+ax1.set_zlabel('Z (µm)')
+ax1.set_title("3D Visualization of Pixel Values")
 
-# Gán nhãn cho các trục
-ax.set_xlabel('X (pixels)')
-ax.set_ylabel('Y (pixels)')
-ax.set_zlabel('Z (µm)')
+# Tạo vùng hiển thị 2D ở bên phải (subplot 2)
+ax2 = fig.add_subplot(122)
+ax2.imshow(subarray.astype(float), cmap='viridis', interpolation='nearest')
+plt.colorbar(ax2.imshow(subarray.astype(float), cmap='viridis', interpolation='nearest'), ax=ax2, label='Số thứ tự ảnh')
+ax2.set_xlabel('X (pixels)')
+ax2.set_ylabel('Y (pixels)')
+ax2.set_title('Hình ảnh 2D của các pixel sáng nhất tại mỗi vị trí')
 
-# Hiển thị đồ thị 3D
-plt.title("3D Visualization of Pixel Values")
+# Hiển thị hình ảnh
 plt.show()

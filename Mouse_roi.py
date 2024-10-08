@@ -1,32 +1,49 @@
 import cv2
-import numpy as np
+import os
+import cupy as cp  # Sử dụng CuPy thay cho NumPy
+import re
+import matplotlib.pyplot as plt
 
+# --- Cài đặt ban đầu ---
 isDragging = False  # Trạng thái kéo thả chuột
 x0, y0, w, h = -1, -1, -1, -1  # Lưu tọa độ của vùng được chọn
 blue, red = (255, 0, 0), (0, 0, 255)  # Màu sắc của hình chữ nhật (xanh dương và đỏ)
-roi_list = []  # Danh sách lưu các vùng đã chọn (ROI)
-
 scale_factor = 0.1  # Tỷ lệ resize ảnh
 
+folder_path = r'D:\tepAnh'  # Đường dẫn đến thư mục chứa các ảnh
+image_files = [f for f in os.listdir(folder_path) if f.endswith('.bmp')]  # Lấy danh sách các file ảnh trong thư mục
 
-# Hàm resize ảnh cho hiển thị
-def resize_for_display(image, max_width=800, max_height=600):
-    height, width = image.shape[:2]
-    aspect_ratio = width / height
-    if width > max_width or height > max_height:
-        if aspect_ratio > 1:
-            new_width = max_width
-            new_height = int(max_width / aspect_ratio)
-        else:
-            new_height = max_height
-            new_width = int(max_height * aspect_ratio)
-        return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-    return image
+# --- Đọc ảnh đầu tiên để lấy kích thước ---
+first_image_path = os.path.join(folder_path, image_files[0])  # Đọc ảnh đầu tiên
+first_image = cv2.imread(first_image_path, cv2.IMREAD_GRAYSCALE)  # Đọc ảnh dưới dạng grayscale
+image_height, image_width = first_image.shape  # Lấy kích thước của ảnh
+print(f"Kích thước ảnh: {image_width} x {image_height} pixels")
 
+# --- Hàm lấy số từ tên file ---
+def extract_number_from_filename(filename):
+    match = re.search(r'\d+', filename)
+    return int(match.group()) if match else None  # Trả về số nguyên thay vì chuỗi
 
-# Hàm xử lý sự kiện chuột
+# --- Hàm hiển thị ảnh 3D ---
+def create_3d_coordinates(subarray, scale=0.5):
+    height, width = subarray.shape
+    x_coords, y_coords, z_coords = [], [], []
+
+    # Sử dụng CuPy để thực hiện các phép toán trên GPU
+    for y in range(height):
+        for x in range(width):
+            if subarray[y, x] is not None:  # Kiểm tra nếu giá trị không phải None
+                x_coords.append(x)
+                y_coords.append(y)
+                z_value = int(subarray[y, x]) * scale
+                z_coords.append(z_value)
+
+    return x_coords, y_coords, z_coords
+
+# --- Hàm xử lý sự kiện chuột ---
 def onMouse(event, x, y, flags, param):
-    global isDragging, x0, y0, w, h, img_resized, img, scale_factor  # Sử dụng biến toàn cục
+    global isDragging, x0, y0, w, h, img_resized, img
+
     if event == cv2.EVENT_LBUTTONDOWN:  # Khi nhấn nút chuột trái (bắt đầu kéo thả)
         isDragging = True
         x0, y0 = x, y  # Lưu tọa độ bắt đầu (theo ảnh đã resize)
@@ -39,6 +56,7 @@ def onMouse(event, x, y, flags, param):
         if isDragging:  # Kết thúc kéo thả
             isDragging = False
             w, h = x - x0, y - y0  # Tính toán chiều rộng và chiều cao vùng đã chọn (theo ảnh đã resize)
+
             if w > 0 and h > 0:  # Nếu chiều rộng và chiều cao dương (kéo đúng hướng)
                 # Tính toán lại tọa độ gốc và kích thước vùng chọn theo ảnh gốc
                 x0_orig = int(x0 / scale_factor)  # Chuyển đổi tọa độ x0 theo ảnh gốc
@@ -49,42 +67,76 @@ def onMouse(event, x, y, flags, param):
                 # Hiển thị các tọa độ gốc tính theo ảnh gốc
                 print(f"Tọa độ gốc trên ảnh gốc: x:{x0_orig}, y:{y0_orig}, w:{w_orig}, h:{h_orig}")
 
-                img_draw = img_resized.copy()  # Sao chép ảnh để vẽ hình chữ nhật cuối cùng
-                cv2.rectangle(img_draw, (x0, y0), (x, y), red,
-                              2)  # Vẽ hình chữ nhật đỏ quanh vùng đã chọn (theo ảnh resize)
+                # Tạo mảng best_image_numbers_roi trên GPU bằng CuPy
+                best_image_numbers_roi = cp.empty((h_orig, w_orig), dtype=int)  # Thay đổi dtype thành int
+                max_pixel_values_roi = cp.full((h_orig, w_orig), -1)
 
-                # Lưu lại các tọa độ vùng chọn gốc để sử dụng sau này
-                roi_list.append(((x0_orig, y0_orig),
-                                 (x0_orig + w_orig, y0_orig + h_orig)))  # Lưu tọa độ vùng đã chọn (theo ảnh gốc)
+                # Duyệt qua từng ảnh trong thư mục để tạo best_image_numbers_roi chỉ cho vùng ROI
+                for image_file in image_files:
+                    image_path = os.path.join(folder_path, image_file)
+                    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
 
-                # Hiển thị và lưu lại vùng đã chọn theo ảnh gốc
-                roi_original = img[y0_orig:y0_orig + h_orig, x0_orig:x0_orig + w_orig]  # Cắt vùng chọn theo ảnh gốc
-                cv2.imshow('cropped', roi_original)  # Hiển thị vùng đã cắt (theo ảnh gốc)
+                    # Kiểm tra kích thước ảnh
+                    if image.shape != (image_height, image_width):
+                        print(f"Kích thước ảnh {image_file} không phù hợp, bỏ qua...")
+                        continue
 
-                # Hiển thị ảnh với hình chữ nhật màu đỏ (theo ảnh resize)
-                cv2.imshow('img', img_draw)
+                    # Lấy ROI từ ảnh
+                    roi_image = image[y0_orig:y0_orig + h_orig, x0_orig:x0_orig + w_orig]
+
+                    # Chuyển đổi ROI sang CuPy để thực hiện các phép toán trên GPU
+                    roi_image_cp = cp.array(roi_image)
+
+                    # Cập nhật max pixel values và best image numbers chỉ cho vùng ROI
+                    brighter_pixels = roi_image_cp > max_pixel_values_roi
+                    max_pixel_values_roi[brighter_pixels] = roi_image_cp[brighter_pixels]
+                    image_number = extract_number_from_filename(image_file)
+                    best_image_numbers_roi[brighter_pixels] = image_number  # Lưu số thứ tự ảnh
+
+                # Chuyển mảng kết quả về CPU để hiển thị với Matplotlib
+                best_image_numbers_roi_cpu = cp.asnumpy(best_image_numbers_roi)
+
+                # Tạo tọa độ 3D từ mảng `best_image_numbers_roi`
+                x_coords, y_coords, z_coords = create_3d_coordinates(best_image_numbers_roi_cpu, scale=0.5)
+
+                # Tạo một cửa sổ và sử dụng subplot để hiển thị cả hai hình ảnh
+                fig = plt.figure(figsize=(14, 6))
+
+                # Tạo vùng hiển thị 3D ở bên trái (subplot 1)
+                ax1 = fig.add_subplot(121, projection='3d')
+                ax1.scatter(x_coords, y_coords, z_coords, c=z_coords, cmap='viridis', marker='o')
+                ax1.set_xlabel('X (pixels)')
+                ax1.set_ylabel('Y (pixels)')
+                ax1.set_zlabel('Z (µm)')
+                ax1.set_title("3D Visualization of Pixel Values")
+
+                # Thiết lập giới hạn cho các trục
+                ax1.set_xlim(0, w_orig)  # Giới hạn trục X
+                ax1.set_ylim(0, h_orig)  # Giới hạn trục Y
+                ax1.set_zlim(0, max(z_coords))  # Giới hạn trục Z dựa trên giá trị tối đa
+
+                # Đặt tỷ lệ cho các trục x, y, z
+                ax1.set_box_aspect([w_orig, h_orig, max(z_coords)])  # Tỷ lệ các trục
+
+                # Tạo vùng hiển thị 2D ở bên phải (subplot 2)
+                ax2 = fig.add_subplot(122)
+                ax2.imshow(best_image_numbers_roi_cpu.astype(float), cmap='viridis', interpolation='nearest')
+                plt.colorbar(ax2.imshow(best_image_numbers_roi_cpu.astype(float), cmap='viridis', interpolation='nearest'), ax=ax2, label='Số thứ tự ảnh')
+                ax2.set_xlabel('X (pixels)')
+                ax2.set_ylabel('Y (pixels)')
+                ax2.set_title('Hình ảnh 2D của các pixel sáng nhất trong ROI')
+
+                # Lưu và hiển thị hình ảnh
+                plt.show()
 
             else:
                 cv2.imshow('img', img_resized)  # Nếu kéo thả sai hướng, hiển thị lại ảnh gốc đã resize
                 print("Vui lòng kéo từ góc trên trái sang góc dưới phải.")
 
-
-# Hàm hiển thị tất cả các vùng đã chọn
-def show_all_rois():
-    # Tạo một ảnh trống có cùng kích thước với ảnh gốc
-    img_with_rois = np.zeros_like(img)
-    img_with_rois[:] = (255, 255, 255)  # Đặt nền trắng cho dễ thấy
-
-    for (start, end) in roi_list:
-        cv2.rectangle(img_with_rois, start, end, red, 2)  # Vẽ hình chữ nhật đỏ cho mỗi vùng đã chọn
-
-    img_resized_for_display = resize_for_display(img_with_rois)  # Resize cho hiển thị
-    cv2.imshow('img', img_resized_for_display)  # Hiển thị tất cả các vùng đã chọn
-
-
-# Đọc ảnh gốc và thay đổi kích thước ảnh
-img = cv2.imread(r'D:\tepAnh\WSI_seq[101].bmp')  # Đọc ảnh gốc
-img_resized = cv2.resize(img, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_LINEAR)  # Resize ảnh
+# --- Đọc ảnh gốc và thay đổi kích thước ảnh ---
+img = cv2.imread(first_image_path)  # Đọc ảnh gốc
+img_resized = cv2.resize(img, None, fx=scale_factor, fy=scale_factor,
+                         interpolation=cv2.INTER_LINEAR)  # Resize ảnh
 
 # Hiển thị ảnh đã resize
 cv2.imshow('img', img_resized)
@@ -94,15 +146,10 @@ cv2.setMouseCallback('img', onMouse)
 
 # Vòng lặp xử lý sự kiện phím nhấn
 while True:
-    key = cv2.waitKey(0)
-    if key == ord('1'):  # Nhấn phím '1' để chọn thêm vùng mới
-        print("Tiếp tục chọn vùng mới...")
-    elif key == ord('0'):  # Nhấn phím '0' để dừng và hiển thị tất cả các vùng đã chọn
-        print("Hiển thị tất cả các vùng đã chọn...")
-        show_all_rois()
-    elif key == ord('q'):  # Nhấn 'q' để thoát chương trình
+    key = cv2.waitKey(1)  # Thay đổi thành 1 để lặp liên tục
+    if key == ord('q'):  # Nhấn 'q' để thoát chương trình
         print("Đã thoát chương trình")
         break
 
-# Đóng tất cả cửa sổ khi hoàn tất
+# Đóng tất cả cửa sổ
 cv2.destroyAllWindows()
